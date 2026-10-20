@@ -1,0 +1,14 @@
+dataset/
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.log
+*.zip
+.env
+.env.*
+backup_model_26k/
+tools/trained_pilot_backup/
+DerivedData/
+xcuserdata/
+.DS_Store
