@@ -1,227 +1,161 @@
-const $ = id => document.getElementById(id);
+import { loadForest, predictForest, featureVector } from './forest.js';
+
+const $ = (id) => document.getElementById(id);
+const camera = $('camera');
 const canvas = $('skeleton');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
-const video = $('camera');
-const resized = document.createElement('canvas');
-resized.width = 224;
-resized.height = 224;
-const resizedCtx = resized.getContext('2d', { willReadFrequently: true });
 const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
-const BASE = new URL('.', import.meta.url);
-const MEDIAPIPE_VERSION = '1.1.1';
-const ORT_VERSION = '1.30.0';
-let stream = null;
-let landmarker = null;
-let session = null;
-let forest = null;
-let running = false;
-let previousTimestamp = -1;
-let lastFrameAt = 0;
-let history = [];
-let rafId = 0;
+const MP = '1.1.1';
+const MODEL_URL = new URL('./models/forest.rf.gz', import.meta.url);
+let forest = null, detector = null, stream = null;
+let running = false, raf = 0, lastAt = 0, lastTS = -1, recent = [], lastLandmarks = null;
+let viewMode = 'normalized';
 
-function setStatus(message, mode = '') {
-  $('status-text').textContent = message;
-  $('status-dot').className = `status-dot ${mode}`;
+const setStatus = (message, error = false) => {
+  $('status').textContent = message;
+  $('status').dataset.error = error ? 'true' : 'false';
+};
+function resetPrediction() {
+  $('letter').textContent = '—';
+  $('confidence').textContent = 'Czekam na dłoń';
+  $('top').replaceChildren();
+  recent = [];
 }
-function resetPredictions() {
-  history = [];
-  $('letter').textContent = '–';
-  $('confidence').textContent = 'Brak predykcji';
-  $('top3').replaceChildren();
-}
-function blankCanvas() { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 400, 400); }
-blankCanvas();
+function paintWhite() { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 400, 400); }
+paintWhite();
 
 function renderSkeleton(landmarks) {
-  blankCanvas();
-  if (!landmarks || landmarks.length !== 21) return false;
-  const mirror = $('mirror').checked;
-  let points = landmarks.map(p => ({ x: mirror ? 1 - p.x : p.x, y: p.y }));
-  if ($('framing').value === 'normalized') {
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
-    let px = points.map(p => ({ x: p.x * width, y: p.y * height }));
+  paintWhite();
+  if (!landmarks || landmarks.length !== 21) return;
+  const mirrored = $('mirror').checked;
+  let points = landmarks.map(p => ({ x: mirrored ? 1 - p.x : p.x, y: p.y }));
+  if (viewMode === 'normalized') {
+    const w = camera.videoWidth || 640;
+    const h = camera.videoHeight || 480;
+    const px = points.map(p => ({ x: p.x * w, y: p.y * h }));
     const palm = Math.max(1, Math.hypot(px[9].x - px[0].x, px[9].y - px[0].y));
-    const sx = (130 / palm) * (480 / 640);
-    const sy = 130 / palm;
+    const scaleY = 130 / palm;
+    const scaleX = scaleY * .75;
     const xs = px.map(p => p.x), ys = px.map(p => p.y);
-    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-    points = px.map(p => ({ x: 188 + (p.x - cx) * sx, y: 209 + (p.y - cy) * sy }));
+    const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    points = px.map(p => ({ x: 188 + (p.x - centerX) * scaleX, y: 209 + (p.y - centerY) * scaleY }));
   } else {
     points = points.map(p => ({ x: p.x * 400, y: p.y * 400 }));
   }
   points = points.map(p => ({ x: Math.floor(p.x) + .5, y: Math.floor(p.y) + .5 }));
-  ctx.strokeStyle = 'rgb(255,0,0)';
+  ctx.save();
   ctx.lineWidth = 2;
+  ctx.strokeStyle = '#ff0000';
   ctx.lineCap = 'round';
   ctx.beginPath();
-  for (const [a, b] of CONNECTIONS) { ctx.moveTo(points[a].x, points[a].y); ctx.lineTo(points[b].x, points[b].y); }
+  for (const [a,b] of CONNECTIONS) { ctx.moveTo(points[a].x,points[a].y);ctx.lineTo(points[b].x,points[b].y); }
   ctx.stroke();
   for (const p of points) {
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,2*Math.PI); ctx.fill();
-    ctx.fillStyle = 'rgb(0,255,0)'; ctx.beginPath(); ctx.arc(p.x,p.y,3,0,2*Math.PI); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle = '#00ff00';ctx.beginPath();ctx.arc(p.x,p.y,2.8,0,Math.PI*2);ctx.fill();
   }
-  $('save').disabled = false;
-  return true;
+  ctx.restore();
 }
 
-function pixelsToTensor() {
-  resizedCtx.imageSmoothingEnabled = true;
-  resizedCtx.imageSmoothingQuality = 'medium';
-  resizedCtx.drawImage(canvas, 0, 0, 224, 224);
-  const {data} = resizedCtx.getImageData(0,0,224,224);
-  const area = 224 * 224;
-  const values = new Float32Array(3 * area);
-  for (let i=0,j=0;i<area;i++,j+=4) {
-    values[i] = data[j] / 255;
-    values[area+i] = data[j+1] / 255;
-    values[2*area+i] = data[j+2] / 255;
-  }
-  return new window.ort.Tensor('float32',values,[1,3,224,224]);
-}
-
-function predictForest(embedding) {
-  if (embedding.length !== forest.featureCount) throw new Error('Niezgodna liczba cech CNN i Random Forest');
-  const sums = Array(forest.classes.length).fill(0);
-  for (const tree of forest.trees) {
-    let node = 0;
-    while (tree.left[node] >= 0) {
-      node = embedding[tree.feature[node]] <= tree.threshold[node] ? tree.left[node] : tree.right[node];
-    }
-    const probabilities = tree.probabilities[tree.leaf[node]];
-    for (let c=0;c<sums.length;c++) sums[c]+=probabilities[c];
-  }
-  return sums.map(value => value / forest.trees.length);
-}
-
-function showPrediction(probabilities) {
+function showScores(scores) {
   if ($('smooth').checked) {
-    history.push(probabilities);
-    if (history.length > 6) history.shift();
-    probabilities = probabilities.map((_,i) => history.reduce((sum,row) => sum+row[i],0) / history.length);
-  } else {
-    history = [];
-  }
-  const top = probabilities.map((value,i) => ({label: forest.classes[i],value})).sort((a,b)=>b.value-a.value).slice(0,3);
-  const threshold = Number($('threshold').value) / 100;
-  $('letter').textContent = top[0].value >= threshold ? top[0].label : '–';
-  $('confidence').textContent = top[0].value >= threshold ? `${(top[0].value*100).toFixed(1)}% pewności` : `Niepewne (${(top[0].value*100).toFixed(1)}%)`;
-  $('top3').replaceChildren(...top.map(row => {
-    const element = document.createElement('div'); element.className='topitem';
-    const label = document.createElement('span');label.textContent=row.label;
-    const percent = document.createElement('span');percent.textContent=`${(row.value*100).toFixed(1)}%`;
-    element.append(label,percent); return element;
+    recent.push(scores);
+    if (recent.length > 4) recent.shift();
+    scores = scores.map((_, i) => recent.reduce((total,row) => total+row[i],0)/recent.length);
+  } else { recent = []; }
+  const best = [...scores].map((probability, index) => ({label:String.fromCharCode(65+index),probability}))
+    .sort((a,b) => b.probability-a.probability).slice(0,3);
+  const threshold = Number($('threshold').value)/100;
+  $('letter').textContent = best[0].probability >= threshold ? best[0].label : '?';
+  $('confidence').textContent = `Głosy lasu: ${(best[0].probability*100).toFixed(1)}% · ${forest.treeCount} drzew`;
+  $('top').replaceChildren(...best.map(item => {
+    const line = document.createElement('div');line.className='score';
+    const name = document.createElement('strong');name.textContent=item.label;
+    const pct = document.createElement('span');pct.textContent=(item.probability*100).toFixed(1)+'%';
+    line.append(name,pct);
+    return line;
   }));
 }
 
-async function initializeModels() {
-  setStatus('Pobieranie detektora dłoni MediaPipe…');
-  const {FilesetResolver,HandLandmarker} = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.mjs`);
-  const vision = await FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`);
-  landmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: {modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate:'CPU'},
-    runningMode: 'VIDEO',numHands:1,minHandDetectionConfidence:.5,minHandPresenceConfidence:.5,minTrackingConfidence:.5
-  });
-  setStatus('Wczytywanie Twojej CNN i Random Forest…');
-  if (!window.ort) throw new Error('Nie załadowano ONNX Runtime Web. Sprawdź połączenie z Internetem.');
-  window.ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
-  window.ort.env.wasm.numThreads = 1;
-  const modelURL = new URL('models/backbone.onnx', BASE);
-  const forestURL = new URL('models/forest.json', BASE);
-  const response = await fetch(forestURL);
-  if (!response.ok) throw new Error(`Brak pliku Random Forest (${response.status}). Sprawdź publikację witryny.`);
-  forest = await response.json();
-  if (forest.featureCount !== 256 || forest.classes.length !== 26 || forest.trees.length !== 160) {
-    throw new Error('Niewłaściwa wersja Random Forest — oczekiwano 160 drzew, 256 cech i 26 klas.');
-  }
-  session = await window.ort.InferenceSession.create(modelURL.toString(), {executionProviders:['wasm'],graphOptimizationLevel:'all'});
-  if (!session.inputNames.length || !session.outputNames.length) throw new Error('Model ONNX nie zawiera wejścia lub wyjścia.');
-}
-
-async function runFrame(now) {
-  if (!running) return;
-  if (now - lastFrameAt < 360 || video.readyState < 2) {
-    rafId = window.requestAnimationFrame(runFrame);
-    return;
-  }
-  lastFrameAt = now;
-  try {
-    let timestamp = performance.now();
-    if (timestamp <= previousTimestamp) timestamp = previousTimestamp + 1;
-    previousTimestamp = timestamp;
-    const t0 = performance.now();
-    const result = landmarker.detectForVideo(video,timestamp);
-    const landmarks = result.landmarks?.[0];
-    if (!landmarks) {
-      resetPredictions();blankCanvas();$('save').disabled=true;
-      $('camera-badge').textContent = 'Nie wykryto dłoni';$('inference-speed').textContent='';
-      return;
-    }
-    if (!renderSkeleton(landmarks)) return;
-    const tensor = pixelsToTensor();
-    const output = await session.run({[session.inputNames[0]]:tensor});
-    const embedding = output[session.outputNames[0]]?.data;
-    if (!embedding) throw new Error('Brak embeddingu CNN');
-    const probabilities = predictForest(embedding);
-    showPrediction(probabilities);
-    $('camera-badge').textContent = '21 punktów dłoni ✓';
-    $('inference-speed').textContent = `${Math.round(performance.now()-t0)} ms`;
-  } catch(error) {
-    console.error(error);
-    stop();
-    setStatus(`Błąd rozpoznawania: ${error.message}`, 'error');
-  } finally {
-    if (running) rafId = window.requestAnimationFrame(runFrame);
+async function initialize() {
+  setStatus('Wczytuję Twój Random Forest (300 drzew)…');
+  if (!forest) forest = await loadForest(MODEL_URL);
+  setStatus('Pobieram detektor dłoni MediaPipe…');
+  if (!detector) {
+    const { FilesetResolver, HandLandmarker } = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP}/vision_bundle.mjs`);
+    const wasm = await FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP}/wasm`);
+    detector = await HandLandmarker.createFromOptions(wasm, {
+      baseOptions: {modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'CPU'},
+      runningMode:'VIDEO',numHands:1,
+      minHandDetectionConfidence:.5,minHandPresenceConfidence:.45,minTrackingConfidence:.5
+    });
   }
 }
 
 async function start() {
-  $('start').disabled=true;
-  setStatus('Inicjalizacja…');
+  $('start').disabled = true;
   try {
-    if (!window.isSecureContext && location.hostname !== 'localhost') throw new Error('Kamera wymaga HTTPS. Otwórz witrynę przez https://.');
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Brak dostępu do kamery w tej przeglądarce. Użyj Safari.');
-    if (!landmarker || !session || !forest) await initializeModels();
-    setStatus('Prośba o zgodę na kamerę…');
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
-    video.srcObject=stream;
-    await video.play();
-    running=true;lastFrameAt=0;previousTimestamp=-1;
-    $('camera-empty').hidden=true;$('start').disabled=true;$('stop').disabled=false;
-    setStatus('Model aktywny — pokaż literę dłonią', 'working');
-    $('camera-badge').textContent='Szukam dłoni…';
-    runFrame(performance.now());
-  } catch(error) {
-    console.error(error);
-    setStatus(error.message || String(error), 'error');
+    if (!window.isSecureContext && location.hostname !== 'localhost') throw new Error('Otwórz witrynę przez HTTPS, nie przez plik ZIP ani file://.');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Brak obsługi kamery — użyj Safari na iPhonie.');
+    await initialize();
+    setStatus('Proszę o zgodę na kamerę…');
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:$('facing').value,width:{ideal:640},height:{ideal:480}},audio:false});
+    camera.srcObject = stream;
+    await camera.play();
+    running = true;lastAt=0;lastTS=-1;
+    $('start').hidden=true; $('stop').hidden=false;
+    $('save').disabled=false;
+    setStatus('Gotowe: pokaż literę dłonią');
+    raf = requestAnimationFrame(frame);
+  } catch(e) {
+    setStatus('Nie udało się uruchomić: '+(e.message||e),true);
     $('start').disabled=false;
-    if (stream) { for(const track of stream.getTracks())track.stop();stream=null; }
+    stopStream();
   }
 }
+
+async function frame(now) {
+  if (!running) return;
+  raf = requestAnimationFrame(frame);
+  if (now-lastAt<220 || camera.readyState<2) return;
+  lastAt=now;
+  try {
+    const timestamp = Math.max(performance.now(),lastTS+1);lastTS=timestamp;
+    const result=detector.detectForVideo(camera,timestamp);
+    const points=result.landmarks?.[0];
+    if (!points) {
+      $('detection').textContent='Nie wykryto dłoni';
+      lastLandmarks=null;recent=[];paintWhite();resetPrediction();return;
+    }
+    lastLandmarks=points;
+    $('detection').textContent='Wykryto 21 punktów';
+    renderSkeleton(points);
+    const features=featureVector(ctx);
+    const scores=predictForest(forest,features);
+    showScores(scores);
+  } catch(e) {stop();setStatus('Błąd analizy: '+(e.message||e),true);}
+}
+function stopStream() {
+  if (stream) {stream.getTracks().forEach(t=>t.stop());stream=null;}
+  camera.srcObject=null;
+}
 function stop() {
-  running = false;
-  window.cancelAnimationFrame(rafId);
-  if(stream){for (const track of stream.getTracks())track.stop();stream=null;}
-  video.srcObject=null;
-  $('camera-empty').hidden=false;
-  $('camera-badge').textContent='Kamera wyłączona';
-  $('start').disabled=false;$('stop').disabled=true;
-  $('inference-speed').textContent='';
-  resetPredictions();
-  if(!$('status-dot').classList.contains('error'))setStatus('Kamera zatrzymana');
+  running=false; cancelAnimationFrame(raf);stopStream();
+  $('start').hidden=false;$('start').disabled=false;$('stop').hidden=true;
+  $('detection').textContent='Kamera wyłączona';
+  resetPrediction();
+  if ($('status').dataset.error!=='true')setStatus('Zatrzymano kamerę');
 }
 $('start').addEventListener('click',start);
 $('stop').addEventListener('click',stop);
+$('facing').addEventListener('change',()=>{if(running){stop();start();}});
+$('framing').addEventListener('change',()=>{viewMode=$('framing').value;recent=[];});
+$('mirror').addEventListener('change',()=>{recent=[];});
+$('smooth').addEventListener('change',()=>{recent=[];});
+$('threshold').addEventListener('input',()=>{$('thresholdLabel').textContent=$('threshold').value+'%';});
 $('save').addEventListener('click',()=>{
-  canvas.toBlob(blob=>{
-    if(!blob)return;
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');a.href=url;a.download=`assn-szkielet-${Date.now()}.png`;a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),2500);
-  },'image/png');
+  if (!lastLandmarks) {setStatus('Najpierw pokaż dłoń w kadrze');return;}
+  const a=document.createElement('a');a.href=canvas.toDataURL('image/png');a.download=`ASSN_szkielet_${Date.now()}.png`;a.click();
 });
-$('threshold').addEventListener('input',()=>{$('threshold-display').textContent=`${$('threshold').value}%`;});
-for(const id of ['framing','mirror','smooth'])$(id).addEventListener('change',resetPredictions);
 window.addEventListener('pagehide',stop);

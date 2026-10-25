@@ -1,32 +1,44 @@
 <!doctype html>
 <html lang="pl">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0a1020">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="ASSN — rozpoznawanie alfabetu ASL w przeglądarce z użyciem Twojej CNN i Random Forest">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icon.png">
-  <title>ASSN · ASL na iPhone</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js" defer></script>
-  <script type="module" src="app.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="theme-color" content="#0b1124"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="description" content="ASSN · ASL na iPhone · Random Forest"/>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="icon.png"/>
+<link rel="stylesheet" href="style.css"/>
+<title>ASSN — Alfabet ASL</title>
 </head>
 <body>
-  <main class="shell">
-    <header><div class="brand"><div class="mark">A<span>²</span></div><div><h1>ASSN</h1><p>Rozpoznawanie ASL · Twój model</p></div></div><span class="chip">WEB / iOS</span></header>
-    <section class="hero" aria-label="Widok kamery">
-      <div class="camera-area"><video id="camera" autoplay muted playsinline></video><div class="camera-empty" id="camera-empty"><div class="camera-icon">✋</div><p>Włącz kamerę, aby zacząć</p></div><div class="camera-badge" id="camera-badge">Kamera wyłączona</div></div>
-      <div class="result-card"><div class="result-heading">Rozpoznana litera</div><div id="letter" class="letter">–</div><div id="confidence" class="confidence">Brak predykcji</div><div class="top3" id="top3"><span>—</span></div></div>
-    </section>
-    <section class="status"><div id="status-dot" class="status-dot"></div><span id="status-text">Przygotowanie do uruchomienia</span><span id="inference-speed" class="speed"></span></section>
-    <section class="controls"><button class="primary" id="start">Uruchom kamerę i model</button><button class="secondary" id="stop" disabled>Zatrzymaj</button></section>
-    <section class="diagnostics"><div class="section-head"><h2>Obraz podawany do modelu</h2><small>400 × 400 → 224 × 224</small></div><div class="preview-row"><canvas id="skeleton" width="400" height="400" aria-label="Szkielet dłoni"></canvas><div class="options"><label>Ustawienie dłoni<select id="framing"><option value="normalized">Normalizacja</option><option value="camera">Kamera</option></select></label><label class="toggle"><input id="mirror" type="checkbox" checked><span>Odbicie lustrzane</span></label><label class="toggle"><input id="smooth" type="checkbox" checked><span>Wygładzanie wyników</span></label><label><span>Próg pewności: <strong id="threshold-display">50%</strong></span><input id="threshold" type="range" min="0" max="95" step="5" value="50"></label><button class="secondary" id="save" disabled>Zapisz szkielet PNG</button></div></div><p class="help">Ten obraz powinien przypominać zdjęcia treningowe. Przetestuj te same gesty z normalizacją i bez niej oraz z odbiciem lustrzanym i bez.</p></section>
-    <section class="notice"><h2>Dlaczego ta wersja jest przydatna?</h2><p>Witryna korzysta z <b>MediaPipe Hand Landmarker</b>, czyli systemu bliższego temu, z którego utworzono dataset. CNN (256 cech) i 160 drzew Random Forest pracują na urządzeniu, bez wysyłania klatek na serwer. Zapisz PNG błędnie rozpoznawanego gestu i porównaj z datasetem.</p><p class="minor">J i Z wymagają ruchu dłoni — klasyfikator pojedynczych klatek nie analizuje pełnego gestu dynamicznego. Pierwsze uruchomienie wymaga Internetu do pobrania modeli.</p></section>
-    <footer>ASSN · CNN trenowana od zera + Random Forest · A–Z</footer>
-  </main>
+<main class="shell">
+  <header><div class="brand"><div class="mark">A<span>²</span></div><div><h1>ASSN</h1><p>Rozpoznawanie alfabetu ASL</p></div></div><div class="tag">iPhone · RF</div></header>
+  <div class="status" id="status" role="status">Naciśnij „Uruchom kamerę”</div>
+  <section class="hero">
+    <div class="cameraCard"><video id="camera" autoplay muted playsinline></video><div class="camTag" id="detection">Kamera wyłączona</div></div>
+    <div class="prediction"><p>Rozpoznana litera</p><strong id="letter">—</strong><small id="confidence">Czekam na dłoń</small><div id="top" class="top"></div></div>
+  </section>
+  <div class="actions"><button class="primary" id="start">Uruchom kamerę</button><button id="stop" hidden>Zatrzymaj kamerę</button></div>
+  <section class="diagnostics">
+    <div class="titleRow"><h2>Obraz przekazywany do Random Forest</h2><span>400 × 400</span></div>
+    <div class="diagGrid"><canvas id="skeleton" width="400" height="400" aria-label="Obraz szkieletu dłoni"></canvas>
+      <div class="settings">
+        <label>Ustawienie szkieletu<select id="framing"><option value="normalized">Normalizacja</option><option value="camera">Kamera</option></select></label>
+        <label>Wybór kamery<select id="facing"><option value="user">Przednia</option><option value="environment">Tylna</option></select></label>
+        <label class="check"><input id="mirror" type="checkbox" checked/> Odbicie lustrzane</label>
+        <label class="check"><input id="smooth" type="checkbox" checked/> Wygładzaj wynik</label>
+        <label>Próg wyświetlania: <b id="thresholdLabel">15%</b><input id="threshold" type="range" min="0" max="80" step="5" value="15"/></label>
+      </div>
+    </div>
+    <button class="save" id="save" disabled>Zapisz szkielet do sprawdzenia</button>
+    <p class="hint">Przetestuj te same gesty w trybach „Normalizacja” i „Kamera”, a następnie z odbiciem i bez. Głosy drzew nie są skalibrowanym prawdopodobieństwem poprawności.</p>
+  </section>
+  <section class="note"><h2>Ważne o tej wersji</h2><p>To <b>Twój Random Forest z pliku ASLClassifier.mlmodel</b> (300 drzew, 2500 cech jasności). Na iPhonie działa w przeglądarce. Safari nie udostępnia natywnego Apple Vision, dlatego do wykrywania 21 punktów dłoni używamy MediaPipe. Wyniki mogą się różnić od aplikacji Xcode.</p><p>J i Z w ASL wymagają ruchu — pojedynczy szkielet nie wystarcza do pełnego rozpoznania tych liter. Obrazy kamery nie są wysyłane na nasz serwer; biblioteka detektora dłoni i model detekcyjny są początkowo pobierane z zewnętrznych serwerów.</p></section>
+  <footer>ASSN · Core ML Random Forest przeniesiony na Web · Bez Xcode</footer>
+</main>
+<script type="module" src="app.js"></script>
 </body>
 </html>

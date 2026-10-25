@@ -1,1 +1,9 @@
-{"name":"ASSN — alfabet ASL","short_name":"ASSN","lang":"pl","start_url":"./","scope":"./","display":"standalone","background_color":"#0a1020","theme_color":"#0a1020","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"},{"src":"icon.png","sizes":"180x180","type":"image/png"}]}
+{
+ "name":"ASSN — Alfabet ASL",
+ "short_name":"ASSN",
+ "start_url":"./",
+ "display":"standalone",
+ "background_color":"#0b1124",
+ "theme_color":"#0b1124",
+ "icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"},{"src":"icon.png","sizes":"192x192","type":"image/png"}]
+}
